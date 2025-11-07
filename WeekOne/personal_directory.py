@@ -1,7 +1,9 @@
 import streamlit as st
 import sqlite3
+import re
+import pandas as pd
 
-# 🔗 Connect to SQLite database
+# 🔗 Connect to SQLite
 conn = sqlite3.connect('directory.db', check_same_thread=False)
 cursor = conn.cursor()
 
@@ -10,63 +12,128 @@ cursor.execute('''
     CREATE TABLE IF NOT EXISTS contacts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        email TEXT NOT NULL,
         phone TEXT NOT NULL,
+        email TEXT NOT NULL,
         comments TEXT
     )
 ''')
 conn.commit()
 
-# 🎨 Streamlit UI
-st.title("📇 Personal Directory")
-st.subheader("Add New Contact")
+# ───────────────────────────────
+# 🧿 Initialize session state
+for key in ["success_add", "success_manage", "reset_form"]:
+    if key not in st.session_state:
+        st.session_state[key] = ""
 
-# 🧾 Input fields
-name = st.text_input("Name")
-email = st.text_input("Email")
-phone = st.text_input("Phone")
-comments = st.text_area("Comments")
+# ───────────────────────────────
+# 🧭 Tabs
+tab1, tab2 = st.tabs(["📝 Add Contact", "🔍 Manage Contacts"])
 
-# 💾 Save to database
-if st.button("Save Contact"):
-    if name and email and phone:
-        cursor.execute("INSERT INTO contacts (name, email, phone, comments) VALUES (?, ?, ?, ?)",
-                       (name, email, phone, comments))
-        conn.commit()
-        st.success("✅ Contact saved successfully!")
+# ───────────────────────────────
+# 📝 Tab 1: Add Contact
+with tab1:
+    st.header("Add New Contact")
+
+    if st.session_state.success_add:
+        st.success(st.session_state.success_add)
+        st.session_state.success_add = ""
+
+    if st.button("🆕 Create New"):
+        st.session_state.reset_form = True
+        st.rerun()
+
+    if st.session_state.reset_form:
+        st.session_state.name_input = ""
+        st.session_state.phone_input = ""
+        st.session_state.email_input = ""
+        st.session_state.comments_input = ""
+        st.session_state.reset_form = False
+
+    name = st.text_input("Name", key="name_input")
+    phone = st.text_input("Phone", key="phone_input")
+    email = st.text_input("Email", key="email_input")
+    comments = st.text_area("Comments", key="comments_input")
+
+    def is_valid_email(email):
+        return re.match(r"[^@]+@[^@]+\.[^@]+", email)
+
+    def is_valid_phone(phone):
+        return phone.isdigit() and len(phone) == 10
+
+    if st.button("Add Contact"):
+        if not name or not phone or not email:
+            st.warning("⚠️ Name, Phone, and Email are required.")
+        elif len(name) > 68:
+            st.warning("⚠️ Name must not exceed 68 characters.")
+        elif not is_valid_phone(phone):
+            st.warning("⚠️ Phone must be exactly 10 digits.")
+        elif not is_valid_email(email):
+            st.warning("⚠️ Invalid email format.")
+        elif len(comments) > 250:
+            st.warning("⚠️ Comments must not exceed 250 characters.")
+        else:
+            cursor.execute("INSERT INTO contacts (name, phone, email, comments) VALUES (?, ?, ?, ?)",
+                           (name, phone, email, comments))
+            conn.commit()
+            st.session_state.success_add = "✅ Contact added successfully."
+            st.session_state.reset_form = True
+            st.rerun()
+
+# ───────────────────────────────
+# 🔍 Tab 2: Manage Contacts
+# ───────────────────────────────
+# 🔍 Tab 2: Manage Contacts
+with tab2:
+    st.header("Search, Edit, or Delete Contacts")
+
+    if st.session_state.success_manage:
+        st.success(st.session_state.success_manage)
+        st.session_state.success_manage = ""
+
+    search_query = st.text_input("Search by name...")
+
+    def load_contacts(search_query=""):
+        if search_query:
+            cursor.execute("""
+                SELECT id, name, phone, email, comments
+                FROM contacts
+                WHERE name LIKE ?
+                ORDER BY name ASC
+            """, (f"%{search_query}%",))
+        else:
+            cursor.execute("SELECT id, name, phone, email, comments FROM contacts ORDER BY name ASC")
+        return cursor.fetchall()
+
+    data = load_contacts(search_query)
+
+    if data:
+        st.write("### Your Contacts")
+
+        df = pd.DataFrame(data, columns=["ID", "Name", "Phone", "Email", "Comments"])
+        df_display = df.drop(columns=["ID"])
+
+        edited_df = st.data_editor(df_display, num_rows="dynamic", use_container_width=True)
+
+        if st.button("💾 Save All Changes"):
+            for i, row in edited_df.iterrows():
+                contact_id = df.iloc[i]["ID"]
+                cursor.execute("""
+                    UPDATE contacts
+                    SET name = ?, phone = ?, email = ?, comments = ?
+                    WHERE id = ?
+                """, (row["Name"], row["Phone"], row["Email"], row["Comments"], contact_id))
+            conn.commit()
+            st.session_state.success_manage = "💾 All changes saved successfully."
+            st.rerun()
+
+        st.write("### 🗑️ Delete a Contact")
+        contact_names = df["Name"].tolist()
+        selected_name = st.selectbox("Select contact to delete", contact_names)
+        if st.button("Delete Selected"):
+            selected_id = df[df["Name"] == selected_name]["ID"].values[0]
+            cursor.execute("DELETE FROM contacts WHERE id = ?", (selected_id,))
+            conn.commit()
+            st.session_state.success_manage = f"🗑️ Contact '{selected_name}' successfully deleted."
+            st.rerun()
     else:
-        st.warning("⚠️ Name, Email, and Phone are required.")
-
-# 📂 View stored contacts with pagination
-st.subheader("📜 Stored Contacts")
-
-# 🔍 Get total number of contacts
-cursor.execute("SELECT COUNT(*) FROM contacts")
-total_contacts = cursor.fetchone()[0]
-contacts_per_page = 10
-total_pages = (total_contacts - 1) // contacts_per_page + 1
-
-# 📄 Page selector
-page_number = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
-
-# 🧮 Calculate offset
-offset = (page_number - 1) * contacts_per_page
-
-# 📥 Fetch paginated contacts sorted by name
-cursor.execute("""
-    SELECT name, email, phone, comments
-    FROM contacts
-    ORDER BY name ASC
-    LIMIT ? OFFSET ?
-""", (contacts_per_page, offset))
-rows = cursor.fetchall()
-
-# 🖥️ Display contacts
-for row in rows:
-    st.markdown(f"**Name:** {row[0]}")
-    st.markdown(f"📧 **Email:** {row[1]}")
-    st.markdown(f"📞 **Phone:** {row[2]}")
-    st.markdown(f"📝 **Comments:** {row[3]}")
-    st.markdown("---")
-
-st.caption(f"Showing page {page_number} of {total_pages} ({total_contacts} total contacts)")
+        st.info("📭 No contacts found.")
